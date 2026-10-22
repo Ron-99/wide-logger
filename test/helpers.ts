@@ -12,10 +12,15 @@ export function captureLogger(options: LoggerOptions = {}) {
     transport: (line) => lines.push(line),
     ...options,
   });
+  const records = () => lines.map((l) => JSON.parse(l) as Record<string, any>);
   return {
     logger,
     lines,
-    records: () => lines.map((l) => JSON.parse(l) as Record<string, any>),
+    records,
+    /** Só os wide events. */
+    wide: () => records().filter((r) => r.log_type === 'wide_event'),
+    /** Só as linhas imediatas (logger.info etc.). */
+    immediate: () => records().filter((r) => r.log_type === 'log'),
   };
 }
 

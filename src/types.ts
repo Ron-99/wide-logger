@@ -56,15 +56,20 @@ export interface LoggerOptions {
   version?: string;
   /** Ambiente (dev, hml, prd...). Default: ENVIRONMENT, STAGE ou NODE_ENV. */
   environment?: string;
-  /** Nível mínimo. Default: LOG_LEVEL, AWS_LAMBDA_LOG_LEVEL ou `info`. */
+  /**
+   * Nível mínimo das linhas imediatas (`logger.info()` etc.). Não descarta wide events:
+   * isso é papel do sampling. `silent` desliga tudo. Default: LOG_LEVEL, AWS_LAMBDA_LOG_LEVEL ou `info`.
+   */
   level?: LevelSetting;
+  /** Header/atributo de onde ler o ID de correlação. Default: `x-correlation-id`. */
+  correlationHeader?: string;
   /** Taxa (0..1) de eventos "felizes" mantidos. Default: LOG_SAMPLE_RATE ou 1. */
   sampleRate?: number;
   /** Acima disso a invocação é considerada lenta: vira `warn` e é sempre mantida. Default: 3000. */
   slowThresholdMs?: number;
   /** Regra extra para sempre manter o evento no tail sampling. */
   keep?: KeepRule;
-  /** Inclui entradas abaixo do nível mínimo (ex.: debug) quando a invocação termina em erro. Default: true. */
+  /** Inclui no `logs[]` do wide event as mensagens abaixo do nível mínimo (ex.: debug) quando a invocação termina em erro. Default: true. */
   flushDebugOnError?: boolean;
   /** Chaves extras a serem redigidas (case-insensitive, ignora `-` e `_`). */
   redactKeys?: string[];
@@ -72,7 +77,7 @@ export interface LoggerOptions {
   redactDefaults?: boolean;
   /** Inclui stack trace nos erros serializados. Default: true. */
   includeStack?: boolean;
-  /** Máximo de entradas em `logs[]` por evento. Default: 100. */
+  /** Máximo de mensagens guardadas no buffer de debug-on-error por invocação. Default: 100. */
   maxLogs?: number;
   /** Strings maiores que isso são truncadas. Default: 8192. */
   maxStringLength?: number;

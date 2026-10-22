@@ -11,6 +11,8 @@ export const handler = logger.withWideEvent(async (event: SqsEvent) => {
   const we = logger.getEvent();
   const batchItemFailures: Array<{ itemIdentifier: string }> = [];
 
+  logger.info('lote recebido', { mensagens: event.Records.length });
+
   for (const record of event.Records) {
     const sinistro = JSON.parse(record.body);
     try {

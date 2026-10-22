@@ -1,6 +1,7 @@
 export { createLogger, type Logger } from './logger.js';
 export { WideEvent } from './wide-event.js';
-export { getCurrentEvent, enrich } from './context.js';
+export { getCurrentEvent, getCorrelationId, enrich } from './context.js';
+export { extractCorrelationId } from './enrichers/correlation.js';
 export { shouldSample, type SamplingDecision, type SamplingInput } from './sampling.js';
 export { parseLevel, isLevelEnabled, deriveLevel } from './levels.js';
 export { serializeError, sanitize } from './serialize.js';

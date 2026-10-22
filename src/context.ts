@@ -15,6 +15,14 @@ export function getCurrentEvent(): WideEvent | undefined {
   return storage.getStore();
 }
 
+/**
+ * ID de correlação da invocação atual. Repasse-o em chamadas a outros serviços
+ * (header `x-correlation-id`, message attribute `correlationId`) para ligar os logs.
+ */
+export function getCorrelationId(): string | undefined {
+  return storage.getStore()?.get<string>('correlation_id');
+}
+
 /** Atalho para enriquecer o evento atual; não faz nada fora de uma invocação. */
 export function enrich(fields: Record<string, unknown>): void {
   storage.getStore()?.set(fields);

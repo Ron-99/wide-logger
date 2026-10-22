@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectTrigger, parseLevel } from '../src/index.js';
+import { detectTrigger, extractCorrelationId, parseLevel } from '../src/index.js';
 import { parseTraceId } from '../src/enrichers/lambda-context.js';
 import { apiV1Event, apiV2Event, eventBridgeEvent, snsEvent, sqsEvent } from './helpers.js';
 
@@ -41,6 +41,39 @@ describe('detectTrigger', () => {
   it('desconhecido', () => {
     expect(detectTrigger({ foo: 1 }).type).toBe('unknown');
     expect(detectTrigger(null).type).toBe('unknown');
+  });
+});
+
+describe('extractCorrelationId', () => {
+  const h = 'x-correlation-id';
+
+  it('lê o header do API Gateway (case-insensitive)', () => {
+    expect(extractCorrelationId(apiV2Event, h)).toBe('corr-1');
+  });
+
+  it('lê message attribute do SQS', () => {
+    const ev = {
+      Records: [{ eventSource: 'aws:sqs', messageAttributes: { correlationId: { stringValue: 'c-sqs', dataType: 'String' } } }],
+    };
+    expect(extractCorrelationId(ev, h)).toBe('c-sqs');
+  });
+
+  it('lê message attribute do SNS', () => {
+    const ev = { Records: [{ EventSource: 'aws:sns', Sns: { MessageAttributes: { 'x-correlation-id': { Type: 'String', Value: 'c-sns' } } } }] };
+    expect(extractCorrelationId(ev, h)).toBe('c-sns');
+  });
+
+  it('lê detail.correlationId do EventBridge', () => {
+    expect(extractCorrelationId({ ...eventBridgeEvent, detail: { correlationId: 'c-eb' } }, h)).toBe('c-eb');
+  });
+
+  it('lê do payload em invocação direta', () => {
+    expect(extractCorrelationId({ correlation_id: 'c-direct' }, h)).toBe('c-direct');
+  });
+
+  it('retorna undefined quando não há', () => {
+    expect(extractCorrelationId(sqsEvent, h)).toBeUndefined();
+    expect(extractCorrelationId(null, h)).toBeUndefined();
   });
 });
 

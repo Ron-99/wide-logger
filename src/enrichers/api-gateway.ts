@@ -29,7 +29,6 @@ export function enrichApiGatewayV2(event: AnyRecord): Record<string, unknown> {
       source_ip: rc.http?.sourceIp,
       user_agent: rc.http?.userAgent ?? header(event.headers, 'user-agent'),
       api_request_id: rc.requestId,
-      correlation_id: header(event.headers, 'x-correlation-id'),
     },
   };
 }
@@ -46,7 +45,6 @@ export function enrichApiGatewayV1(event: AnyRecord): Record<string, unknown> {
       source_ip: rc.identity?.sourceIp,
       user_agent: rc.identity?.userAgent ?? header(event.headers, 'user-agent'),
       api_request_id: rc.requestId,
-      correlation_id: header(event.headers, 'x-correlation-id'),
     },
   };
 }

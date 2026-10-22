@@ -1,4 +1,5 @@
 import { getCurrentEvent, runWithEvent } from './context.js';
+import { extractCorrelationId } from './enrichers/correlation.js';
 import { detectTrigger } from './enrichers/detect.js';
 import { consumeColdStart, lambdaEndFields, lambdaStartFields } from './enrichers/lambda-context.js';
 import { deriveLevel, isLevelEnabled, parseLevel } from './levels.js';
@@ -12,8 +13,9 @@ import { WideEvent } from './wide-event.js';
 export interface Logger {
   readonly level: LevelSetting;
   /**
-   * Dentro de uma invocação, adiciona a mensagem ao `logs[]` do wide event.
-   * Fora dela (ex.: código de inicialização), emite uma linha estruturada imediatamente.
+   * Emite uma linha imediata (`log_type: "log"`) se o nível estiver habilitado.
+   * Dentro de uma invocação, a linha leva `request_id`, `trace_id` e `correlation_id`;
+   * mensagens abaixo do nível ficam em buffer e entram no `logs[]` do wide event se houver erro.
    */
   debug(message: string, data?: unknown): void;
   info(message: string, data?: unknown): void;
@@ -49,6 +51,7 @@ export function createLogger(options: LoggerOptions = {}): Logger {
   const maxEventBytes = options.maxEventBytes ?? 200_000;
   const includeStack = options.includeStack ?? true;
   const autoEnrich = options.autoEnrich ?? true;
+  const correlationHeader = options.correlationHeader ?? 'x-correlation-id';
   const transport = options.transport ?? stdoutTransport;
   const random = options.random ?? Math.random;
 
@@ -79,7 +82,7 @@ export function createLogger(options: LoggerOptions = {}): Logger {
       return withoutLogs;
     }
     const core = [
-      'timestamp', 'level', 'log_type', 'service', 'version', 'environment', 'request_id', 'trace_id',
+      'timestamp', 'level', 'log_type', 'service', 'version', 'environment', 'request_id', 'trace_id', 'correlation_id',
       'region', 'duration_ms', 'outcome', 'error', 'http', 'trigger', 'sampling',
     ];
     const minimal: Record<string, unknown> = { truncated: true };
@@ -93,7 +96,20 @@ export function createLogger(options: LoggerOptions = {}): Logger {
   const log = (lvl: LogLevel, message: string, data?: unknown): void => {
     const current = getCurrentEvent();
     if (current) {
-      current.addLog(lvl, message, data);
+      // Linha imediata ligada à invocação pelos mesmos IDs do wide event.
+      if (!current.recordLog(lvl, message, data)) return;
+      write({
+        timestamp: new Date().toISOString(),
+        level: lvl,
+        log_type: 'log',
+        ...baseFields,
+        request_id: current.get('request_id'),
+        trace_id: current.get('trace_id'),
+        correlation_id: current.get('correlation_id'),
+        elapsed_ms: current.elapsedMs(),
+        message,
+        data,
+      });
       return;
     }
     if (!isLevelEnabled(lvl, level)) return;
@@ -119,7 +135,8 @@ export function createLogger(options: LoggerOptions = {}): Logger {
       slowThresholdMs,
     });
 
-    if (!isLevelEnabled(finalLevel, level)) return;
+    // O nível mínimo só filtra linhas imediatas; quem decide gravar o wide event é o sampling.
+    if (level === 'silent') return;
 
     const sampling = shouldSample({
       event,
@@ -132,8 +149,7 @@ export function createLogger(options: LoggerOptions = {}): Logger {
     });
     if (!sampling.keep) return;
 
-    const logs = event.getLogs(flushDebugOnError && finalLevel === 'error');
-    const dropped = event.getDroppedLogs();
+    const logs = flushDebugOnError && finalLevel === 'error' ? event.getBufferedLogs() : [];
 
     write({
       timestamp,
@@ -144,8 +160,8 @@ export function createLogger(options: LoggerOptions = {}): Logger {
       ...fields,
       duration_ms: durationMs,
       error: event.getError(),
+      logs_emitted: event.getEmittedCounts(),
       logs: logs.length > 0 ? logs : undefined,
-      logs_dropped: dropped > 0 ? dropped : undefined,
       sampling: { rate: sampling.rate, reason: sampling.reason },
     });
   };
@@ -160,6 +176,13 @@ export function createLogger(options: LoggerOptions = {}): Logger {
 
       try {
         event.set(lambdaStartFields(context, consumeColdStart()));
+      } catch {
+        // ignora
+      }
+      try {
+        event.set({
+          correlation_id: extractCorrelationId(lambdaEvent, correlationHeader) ?? context?.awsRequestId,
+        });
         if (trigger) event.set(trigger.start(lambdaEvent));
       } catch {
         // Evento de origem inesperado: segue sem o enriquecimento automático.

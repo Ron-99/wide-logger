@@ -43,11 +43,10 @@ export class WideEvent {
   private readonly startedAt = performance.now();
   private readonly options: WideEventOptions;
 
-  /** Entradas acima do nível mínimo. */
-  private readonly entries: StoredEntry[] = [];
   /** Entradas abaixo do nível mínimo, guardadas para o caso de a invocação falhar. */
   private readonly buffered: StoredEntry[] = [];
-  private droppedLogs = 0;
+  /** Quantas linhas imediatas foram emitidas, por nível. */
+  private readonly emitted: Partial<Record<LogLevel, number>> = {};
   private seq = 0;
 
   private error?: ErrorInfo;
@@ -146,32 +145,35 @@ export class WideEvent {
     return Math.round(performance.now() - this.startedAt);
   }
 
-  /** Adiciona uma mensagem pontual ao array `logs[]` do evento. */
-  addLog(level: LogLevel, message: string, data?: unknown): this {
+  /**
+   * Registra uma mensagem pontual da invocação. Retorna `true` se ela deve sair
+   * como linha imediata (nível habilitado); caso contrário, ela fica no buffer
+   * de debug-on-error.
+   */
+  recordLog(level: LogLevel, message: string, data?: unknown): boolean {
     if (level === 'warn' || level === 'error') this.escalate(level);
+
+    if (isLevelEnabled(level, this.options.minLevel)) {
+      this.emitted[level] = (this.emitted[level] ?? 0) + 1;
+      return true;
+    }
 
     const entry: StoredEntry = { seq: this.seq++, level, message, elapsed_ms: this.elapsedMs() };
     if (data !== undefined) entry.data = data;
-
-    if (isLevelEnabled(level, this.options.minLevel)) {
-      if (this.entries.length < this.options.maxLogs) this.entries.push(entry);
-      else this.droppedLogs++;
-    } else {
-      // Buffer circular: mantém as entradas mais recentes.
-      this.buffered.push(entry);
-      if (this.buffered.length > this.options.maxLogs) this.buffered.shift();
-    }
-    return this;
+    // Buffer circular: mantém as entradas mais recentes.
+    this.buffered.push(entry);
+    if (this.buffered.length > this.options.maxLogs) this.buffered.shift();
+    return false;
   }
 
-  /** Entradas a serem emitidas. Com `includeBuffered`, inclui as abaixo do nível mínimo. */
-  getLogs(includeBuffered: boolean): LogEntry[] {
-    const all = includeBuffered ? [...this.entries, ...this.buffered].sort((a, b) => a.seq - b.seq) : this.entries;
-    return all.map(({ seq: _seq, ...entry }) => entry);
+  /** Mensagens abaixo do nível mínimo, guardadas para o caso de erro. */
+  getBufferedLogs(): LogEntry[] {
+    return this.buffered.map(({ seq: _seq, ...entry }) => entry);
   }
 
-  getDroppedLogs(): number {
-    return this.droppedLogs;
+  /** Contagem de linhas imediatas emitidas por nível (`undefined` se nenhuma). */
+  getEmittedCounts(): Partial<Record<LogLevel, number>> | undefined {
+    return Object.keys(this.emitted).length > 0 ? { ...this.emitted } : undefined;
   }
 
   /** Cópia rasa dos campos de negócio/contexto acumulados. */
