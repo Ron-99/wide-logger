@@ -7,6 +7,8 @@ export { parseLevel, isLevelEnabled, deriveLevel } from './levels.js';
 export { serializeError, sanitize } from './serialize.js';
 export { DEFAULT_REDACT_KEYS, REDACTED } from './redact.js';
 export { stdoutTransport } from './transport.js';
+export { createPinoInstance } from './pino.js';
+export { summarizeWideEvent } from './wide-event.js';
 export { detectTrigger, type TriggerType } from './enrichers/detect.js';
 export type {
   ErrorInfo,
@@ -17,5 +19,6 @@ export type {
   LogEntry,
   LoggerOptions,
   LogLevel,
+  TraceContext,
   Transport,
 } from './types.js';

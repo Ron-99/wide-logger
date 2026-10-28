@@ -4,7 +4,8 @@ Logger para AWS Lambda no padrão **wide event** (canonical log line), baseado e
 
 Em vez de várias linhas soltas (`"iniciando"`, `"buscou usuário"`, `"pagamento falhou"`), cada invocação produz **um único evento JSON rico em contexto**, enriquecido ao longo da execução e emitido **uma vez** no final. Assim, cada linha responde sozinha "o que aconteceu com essa requisição?" e pode ser consultada por qualquer campo no CloudWatch Logs Insights.
 
-- Zero dependências de runtime, ESM + CJS, Node >= 18
+- Saída via [pino](https://getpino.io) (única dependência de runtime), ESM + CJS, Node >= 18
+- Formato pronto para CloudWatch **e Dynatrace** (nível em texto, `message` legível, `service.name`, `dt.trace_id`)
 - Log levels derivados do resultado da invocação
 - Linhas imediatas ("passou por aqui") ligadas à invocação por `request_id`, `trace_id` e `correlation_id`
 - Tail sampling (erros, lentos e warns são sempre mantidos)
@@ -42,7 +43,7 @@ export const handler = logger.withWideEvent(async (event) => {
 Saída (uma linha por invocação):
 
 ```json
-{"timestamp":"2026-10-22T15:25:27.475Z","level":"info","log_type":"wide_event","service":"cotacao-auto","version":"2.4.1","environment":"dev","request_id":"c0ffee...","trace_id":"1-5759e988-...","region":"sa-east-1","lambda":{"function_name":"cotacao-auto","memory_limit_mb":512,"cold_start":true,"remaining_time_ms":29000,"memory_used_mb":72},"trigger":{"type":"api_gateway_http"},"http":{"method":"POST","path":"/cotacoes","route":"POST /cotacoes","status_code":201},"user":{"id":"u_456","tier":"corporate"},"timings":{"motor_preco_ms":22},"quote":{"id":"cot_123","premium_cents":189900},"outcome":"success","duration_ms":27,"sampling":{"rate":0.05,"reason":"corporate_user"}}
+{"level":"info","timestamp":"2026-10-22T15:25:27.475Z","log_type":"wide_event","message":"POST /cotacoes 201 success 27ms","service":"cotacao-auto","version":"2.4.1","environment":"dev","service.name":"cotacao-auto","service.version":"2.4.1","deployment.environment":"dev","request_id":"c0ffee...","trace_id":"1-5759e988-...","region":"sa-east-1","lambda":{"function_name":"cotacao-auto","memory_limit_mb":512,"cold_start":true,"remaining_time_ms":29000,"memory_used_mb":72},"trigger":{"type":"api_gateway_http"},"http":{"method":"POST","path":"/cotacoes","route":"POST /cotacoes","status_code":201},"user":{"id":"u_456","tier":"corporate"},"timings":{"motor_preco_ms":22},"quote":{"id":"cot_123","premium_cents":189900},"outcome":"success","duration_ms":27,"sampling":{"rate":0.05,"reason":"corporate_user"}}
 ```
 
 ### Enriquecendo de outras camadas
@@ -91,7 +92,7 @@ logger.info('chamando motor de preço', { produto: 'auto' });
 Cada chamada vira uma linha **na hora**, já ligada à invocação:
 
 ```json
-{"timestamp":"...","level":"info","log_type":"log","service":"cotacao-auto","request_id":"c0ffee-1","trace_id":"1-5759e988-...","correlation_id":"cotacao-7f3a","elapsed_ms":2,"message":"payload validado"}
+{"level":"info","timestamp":"...","log_type":"log","service":"cotacao-auto","service.name":"cotacao-auto","request_id":"c0ffee-1","trace_id":"1-5759e988-...","correlation_id":"cotacao-7f3a","elapsed_ms":2,"message":"payload validado"}
 ```
 
 Essas mensagens **não são copiadas** para o wide event. Ele traz apenas `logs_emitted: { info: 2, warn: 1 }`, para você saber que existem linhas daquela invocação.
@@ -171,9 +172,66 @@ O campo `sampling: { rate, reason }` informa por que o evento foi mantido. Se vo
 | `maxEventBytes` | | `200000` |
 | `autoEnrich` | | `true` |
 | `staticFields` | | — |
-| `transport` | | `process.stdout` |
+| `transport` (adaptado como destino do pino) | | stdout síncrono |
+| `traceContext` | | — |
 
 Se o evento passar de `maxEventBytes` (o limite do CloudWatch é 256 KB), o `logs[]` é descartado e o evento recebe `truncated: true`.
+
+## Pino
+
+Todas as linhas são escritas por uma instância [pino](https://getpino.io) criada pela lib, com destino **síncrono** em stdout (não perde linhas quando a Lambda congela). O pino não filtra nível: `LOG_LEVEL` e o sampling continuam sendo decididos pela lib. A redação de dados sensíveis também continua na lib, antes de chegar ao pino.
+
+A instância fica disponível em `logger.pino`, caso alguma lib de terceiros precise de um logger pino:
+
+```ts
+const sdkLogger = logger.pino.child({ component: 'aws-sdk' });
+```
+
+`transport` continua aceito (testes, destinos customizados): ele recebe cada linha já serializada pelo pino.
+
+## Dynatrace
+
+A saída é JSON de uma linha, então funciona tanto com o **OneAgent/extensão Lambda** (que lê stdout) quanto com o **CloudWatch → Dynatrace** (log forwarder/Firehose). Campos pensados para o Dynatrace:
+
+| Campo | Para quê |
+|---|---|
+| `level` em texto (`info`, `warn`, `error`...) | Vira o `loglevel`/`status` da linha (nível numérico do pino padrão não seria reconhecido) |
+| `message` | Conteúdo exibido na lista de logs. O wide event recebe um resumo, ex.: `POST /cotacoes 201 success 27ms` ou `sqs fila-sinistros error 120ms` |
+| `timestamp` (ISO) | Horário da linha |
+| `service.name`, `service.version`, `deployment.environment` | Atributos semânticos que ligam a linha ao serviço (espelham `service`, `version`, `environment`) |
+| `dt.trace_id`, `dt.span_id` | Ligação log ↔ trace, quando `traceContext` está configurado |
+
+### Ligando logs aos traces
+
+Com OneAgent ou OpenTelemetry ativo, informe o span atual:
+
+```ts
+import { trace } from '@opentelemetry/api';
+
+const logger = createLogger({
+  traceContext: () => {
+    const ctx = trace.getActiveSpan()?.spanContext();
+    return ctx && { trace_id: ctx.traceId, span_id: ctx.spanId };
+  },
+});
+```
+
+Se a função lançar erro ou retornar `undefined`, os campos `dt.*` são omitidos. O `trace_id` do X-Ray continua sendo gravado normalmente.
+
+### Consultas DQL
+
+```
+fetch logs
+| filter log_type == "wide_event" and loglevel == "ERROR"
+| fields timestamp, service.name, content, http.route, error.type
+| sort timestamp desc
+```
+
+```
+fetch logs
+| filter correlation_id == "cotacao-7f3a"
+| sort timestamp asc
+```
 
 ## Consultas no CloudWatch Logs Insights
 

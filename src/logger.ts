@@ -1,3 +1,4 @@
+import type { Logger as PinoLogger } from 'pino';
 import { getCurrentEvent, runWithEvent } from './context.js';
 import { extractCorrelationId } from './enrichers/correlation.js';
 import { detectTrigger } from './enrichers/detect.js';
@@ -6,12 +7,14 @@ import { deriveLevel, isLevelEnabled, parseLevel } from './levels.js';
 import { createRedactor } from './redact.js';
 import { shouldSample } from './sampling.js';
 import { sanitize, type SanitizeOptions } from './serialize.js';
-import { stdoutTransport } from './transport.js';
+import { createPinoInstance } from './pino.js';
 import type { LambdaContext, LambdaHandler, LevelSetting, LoggerOptions, LogLevel } from './types.js';
-import { WideEvent } from './wide-event.js';
+import { summarizeWideEvent, WideEvent } from './wide-event.js';
 
 export interface Logger {
   readonly level: LevelSetting;
+  /** Instância pino usada para escrever as linhas. */
+  readonly pino: PinoLogger;
   /**
    * Emite uma linha imediata (`log_type: "log"`) se o nível estiver habilitado.
    * Dentro de uma invocação, a linha leva `request_id`, `trace_id` e `correlation_id`;
@@ -52,7 +55,7 @@ export function createLogger(options: LoggerOptions = {}): Logger {
   const includeStack = options.includeStack ?? true;
   const autoEnrich = options.autoEnrich ?? true;
   const correlationHeader = options.correlationHeader ?? 'x-correlation-id';
-  const transport = options.transport ?? stdoutTransport;
+  const pinoLogger = createPinoInstance(options.transport);
   const random = options.random ?? Math.random;
 
   const sanitizeOptions: SanitizeOptions = {
@@ -61,15 +64,35 @@ export function createLogger(options: LoggerOptions = {}): Logger {
     includeStack,
   };
 
-  const baseFields = { service, version, environment };
+  // `service.name`, `service.version` e `deployment.environment` são atributos semânticos reconhecidos pelo Dynatrace.
+  const baseFields = {
+    service,
+    version,
+    environment,
+    'service.name': service,
+    'service.version': version,
+    'deployment.environment': environment,
+  };
+
+  const traceFields = (): Record<string, unknown> | undefined => {
+    if (!options.traceContext) return undefined;
+    try {
+      const ctx = options.traceContext();
+      if (!ctx) return undefined;
+      return { 'dt.trace_id': ctx.trace_id, 'dt.span_id': ctx.span_id };
+    } catch {
+      return undefined;
+    }
+  };
 
   const write = (record: Record<string, unknown>): void => {
     try {
-      let line = JSON.stringify(sanitize(record, sanitizeOptions));
-      if (Buffer.byteLength(line) > maxEventBytes) {
-        line = JSON.stringify(sanitize(shrink(record), sanitizeOptions));
+      let clean = sanitize(record, sanitizeOptions) as Record<string, unknown>;
+      if (Buffer.byteLength(JSON.stringify(clean)) > maxEventBytes) {
+        clean = sanitize(shrink(record), sanitizeOptions) as Record<string, unknown>;
       }
-      transport(line);
+      const { level: lvl, message, ...rest } = clean;
+      pinoLogger[lvl as LogLevel](rest, typeof message === 'string' ? message : undefined);
     } catch {
       // Logging nunca deve derrubar a invocação.
     }
@@ -82,8 +105,8 @@ export function createLogger(options: LoggerOptions = {}): Logger {
       return withoutLogs;
     }
     const core = [
-      'timestamp', 'level', 'log_type', 'service', 'version', 'environment', 'request_id', 'trace_id', 'correlation_id',
-      'region', 'duration_ms', 'outcome', 'error', 'http', 'trigger', 'sampling',
+      'timestamp', 'level', 'log_type', 'message', 'service', 'version', 'environment', 'service.name', 'service.version',
+      'deployment.environment', 'request_id', 'trace_id', 'correlation_id', 'dt.trace_id', 'dt.span_id', 'region', 'duration_ms', 'outcome', 'error', 'http', 'trigger', 'sampling',
     ];
     const minimal: Record<string, unknown> = { truncated: true };
     for (const key of core) minimal[key] = record[key];
@@ -106,6 +129,7 @@ export function createLogger(options: LoggerOptions = {}): Logger {
         request_id: current.get('request_id'),
         trace_id: current.get('trace_id'),
         correlation_id: current.get('correlation_id'),
+        ...traceFields(),
         elapsed_ms: current.elapsedMs(),
         message,
         data,
@@ -118,6 +142,7 @@ export function createLogger(options: LoggerOptions = {}): Logger {
       level: lvl,
       log_type: 'log',
       ...baseFields,
+      ...traceFields(),
       message,
       data,
     });
@@ -155,7 +180,9 @@ export function createLogger(options: LoggerOptions = {}): Logger {
       timestamp,
       level: finalLevel,
       log_type: 'wide_event',
+      message: summarizeWideEvent({ service, ...fields }, durationMs),
       ...baseFields,
+      ...traceFields(),
       ...options.staticFields,
       ...fields,
       duration_ms: durationMs,
@@ -217,6 +244,7 @@ export function createLogger(options: LoggerOptions = {}): Logger {
 
   return {
     level,
+    pino: pinoLogger,
     debug: (message, data) => log('debug', message, data),
     info: (message, data) => log('info', message, data),
     warn: (message, data) => log('warn', message, data),

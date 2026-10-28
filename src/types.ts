@@ -32,6 +32,11 @@ export interface ErrorInfo {
   [key: string]: unknown;
 }
 
+export interface TraceContext {
+  trace_id?: string;
+  span_id?: string;
+}
+
 export interface LogEntry {
   level: LogLevel;
   message: string;
@@ -40,7 +45,7 @@ export interface LogEntry {
   data?: unknown;
 }
 
-/** Recebe uma linha JSON já serializada. O default escreve em stdout. */
+/** Recebe uma linha JSON já serializada (pelo pino). O default escreve em stdout. */
 export type Transport = (line: string) => void;
 
 /**
@@ -87,8 +92,13 @@ export interface LoggerOptions {
   autoEnrich?: boolean;
   /** Campos fixos adicionados em todos os eventos (ex.: { team: 'cotacao' }). */
   staticFields?: Record<string, unknown>;
-  /** Destino das linhas. Default: process.stdout. */
+  /** Destino das linhas, adaptado como destino do pino. Default: stdout síncrono. */
   transport?: Transport;
+  /**
+   * Contexto de trace W3C ativo (ex.: OneAgent/OpenTelemetry). Quando retorna valores,
+   * as linhas ganham `dt.trace_id` e `dt.span_id`, ligando log e trace no Dynatrace.
+   */
+  traceContext?: () => TraceContext | undefined;
   /** Fonte de aleatoriedade (útil para testes). Default: Math.random. */
   random?: () => number;
 }

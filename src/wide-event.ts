@@ -30,6 +30,26 @@ function deepMerge(target: Fields, source: Fields): Fields {
   return target;
 }
 
+/**
+ * Resumo legível do wide event para o campo `message` (ex.: `"POST /cotacoes 201 success 27ms"`).
+ * Sem ele, ferramentas como o Dynatrace mostram só o JSON bruto como conteúdo da linha.
+ */
+export function summarizeWideEvent(fields: Fields, durationMs: number): string {
+  const http = isPlainObject(fields.http) ? fields.http : undefined;
+  const trigger = isPlainObject(fields.trigger) ? fields.trigger : undefined;
+  const parts: unknown[] = [];
+
+  if (http && (http.method || http.path)) {
+    parts.push(http.method, http.path ?? http.route, http.status_code);
+  } else if (trigger?.type && trigger.type !== 'unknown') {
+    parts.push(trigger.type, trigger.queue ?? trigger.topic ?? trigger.detail_type);
+  } else {
+    parts.push(fields.service ?? 'invocation');
+  }
+  parts.push(fields.outcome, `${durationMs}ms`);
+  return parts.filter((p) => p !== undefined && p !== null && p !== '').join(' ');
+}
+
 interface StoredEntry extends LogEntry {
   seq: number;
 }
