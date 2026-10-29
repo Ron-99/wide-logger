@@ -111,7 +111,8 @@ O `correlation_id` é lido, nesta ordem, de:
 1. o header `x-correlation-id` (API Gateway); o nome é configurável com `correlationHeader`;
 2. o message attribute `correlationId` ou `x-correlation-id` do primeiro record (SQS e SNS);
 3. `detail.correlationId` (EventBridge);
-4. `correlationId` ou `correlation_id` no payload (invocação direta).
+4. `correlationId` ou `correlation_id` no payload (invocação direta);
+5. `Custom.correlationId` do `ClientContext` da invocação (Lambda chamando Lambda sem alterar o payload).
 
 Para o processo continuar ligado no próximo serviço, repasse o ID:
 
@@ -122,6 +123,16 @@ await sqs.send(new SendMessageCommand({
   QueueUrl,
   MessageBody: JSON.stringify(payload),
   MessageAttributes: { correlationId: { DataType: 'String', StringValue: getCorrelationId() } },
+}));
+```
+
+Entre Lambdas, sem mexer no payload:
+
+```ts
+await lambda.send(new InvokeCommand({
+  FunctionName,
+  Payload: JSON.stringify(payload),
+  ClientContext: Buffer.from(JSON.stringify({ Custom: { correlationId: getCorrelationId() } })).toString('base64'),
 }));
 ```
 
@@ -139,6 +150,10 @@ Níveis: `debug < info < warn < error`, além de `silent`.
 - **Fora** de uma invocação (código de init), as linhas imediatas saem sem os IDs de invocação.
 
 O `timestamp` do wide event é o **início** da invocação. As linhas imediatas têm o horário em que foram escritas e `elapsed_ms` desde o início.
+
+## Timeout da Lambda
+
+Quando a Lambda estoura o timeout, o processo é encerrado e o código depois do handler não roda. Para não perder a invocação, a lib agenda a gravação do wide event `timeoutMarginMs` (default 500 ms) antes do fim, usando `context.getRemainingTimeInMillis()`. O evento sai com `outcome: "timeout"`, nível `error`, `error.type: "LambdaTimeoutError"` e todos os campos acumulados até aquele momento. Se o handler terminar depois disso, o evento não é gravado de novo. Use `timeoutMarginMs: 0` para desligar.
 
 ## Tail sampling
 
@@ -168,6 +183,7 @@ O campo `sampling: { rate, reason }` informa por que o evento foi mantido. Se vo
 | `redactKeys` / `redactDefaults` | | `[]` / `true` |
 | `includeStack` | | `true` |
 | `maxLogs` (buffer de debug-on-error) | | `100` |
+| `timeoutMarginMs` | | `500` |
 | `maxStringLength` | | `8192` |
 | `maxEventBytes` | | `200000` |
 | `autoEnrich` | | `true` |

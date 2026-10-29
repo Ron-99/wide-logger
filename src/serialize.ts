@@ -12,6 +12,7 @@ export interface SanitizeOptions {
 const DEFAULT_MAX_DEPTH = 12;
 const DEFAULT_MAX_ARRAY = 100;
 const MAX_CAUSE_DEPTH = 3;
+const AXIOS_SKIP_KEYS = new Set(['config', 'request', 'response', 'isAxiosError', 'toJSON']);
 
 export function truncate(value: string, max: number): string {
   if (value.length <= max) return value;
@@ -42,11 +43,24 @@ export function serializeError(err: unknown, includeStack = true, depth = 0): Er
   const raw = err as Error & Record<string, unknown>;
   const info: ErrorInfo = { type: err.name || err.constructor?.name || 'Error', message: err.message };
 
+  // Erros do axios carregam request/config inteiros (sockets, agent, certificados): fica só o essencial.
+  const isAxios = raw.isAxiosError === true;
+
   // Propriedades próprias (ex.: statusCode, declineCode) carregam contexto valioso.
   for (const key of Object.keys(raw)) {
     if (key === 'stack' || key === 'message' || key === 'name' || key === 'cause') continue;
     if (key === '$metadata' || key === '$response') continue;
+    if (isAxios && AXIOS_SKIP_KEYS.has(key)) continue;
     info[key] = raw[key];
+  }
+
+  if (isAxios) {
+    const config = raw.config as { method?: string; url?: string; baseURL?: string } | undefined;
+    const response = raw.response as { status?: number; data?: unknown } | undefined;
+    if (config?.method) info.http_method = config.method.toUpperCase();
+    if (config?.url) info.url = config.baseURL && !/^https?:/i.test(config.url) ? `${config.baseURL}${config.url}` : config.url;
+    if (response?.status !== undefined) info.http_status_code = response.status;
+    if (response?.data !== undefined) info.response_data = response.data;
   }
 
   if (raw.code !== undefined && (typeof raw.code === 'string' || typeof raw.code === 'number')) {

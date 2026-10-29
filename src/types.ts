@@ -15,6 +15,8 @@ export interface LambdaContext {
   logGroupName?: string;
   logStreamName?: string;
   getRemainingTimeInMillis?: () => number;
+  /** Preenchido quando a Lambda é invocada pelo SDK com `ClientContext`. */
+  clientContext?: { Custom?: Record<string, unknown> } | null;
 }
 
 export type LambdaHandler<TEvent = unknown, TResult = unknown> = (
@@ -84,6 +86,11 @@ export interface LoggerOptions {
   includeStack?: boolean;
   /** Máximo de mensagens guardadas no buffer de debug-on-error por invocação. Default: 100. */
   maxLogs?: number;
+  /**
+   * Antecedência, em ms, com que o wide event é gravado antes do timeout da Lambda, com
+   * `outcome: "timeout"` e nível `error`. `0` desliga. Default: 500.
+   */
+  timeoutMarginMs?: number;
   /** Strings maiores que isso são truncadas. Default: 8192. */
   maxStringLength?: number;
   /** Tamanho máximo da linha emitida (CloudWatch aceita até 256 KB). Default: 200_000. */

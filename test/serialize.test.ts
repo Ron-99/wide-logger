@@ -76,3 +76,26 @@ describe('serializeError', () => {
     expect(serializeError({ name: 'Custom', message: 'm' })).toEqual({ type: 'Custom', message: 'm' });
   });
 });
+
+describe('serializeError com axios', () => {
+  it('mantém só método, url, status e corpo da resposta', () => {
+    const err = Object.assign(new Error('Request failed with status code 502'), {
+      name: 'AxiosError',
+      code: 'ERR_BAD_RESPONSE',
+      isAxiosError: true,
+      config: { method: 'post', url: 'https://parceiro/api', headers: { Authorization: 'Bearer x' }, httpsAgent: { ca: 'CERT' } },
+      request: { socket: {} },
+      response: { status: 502, data: { message: 'bad gateway' }, headers: {} },
+    });
+    const info = serializeError(err, false);
+    expect(info).toEqual({
+      type: 'AxiosError',
+      message: 'Request failed with status code 502',
+      code: 'ERR_BAD_RESPONSE',
+      http_method: 'POST',
+      url: 'https://parceiro/api',
+      http_status_code: 502,
+      response_data: { message: 'bad gateway' },
+    });
+  });
+});

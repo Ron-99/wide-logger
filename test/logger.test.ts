@@ -369,3 +369,74 @@ describe('configuração por variáveis de ambiente', () => {
     }
   });
 });
+
+describe('correlation_id via ClientContext', () => {
+  it('usa Custom.correlationId do ClientContext quando o evento não traz o ID', async () => {
+    const { logger, wide } = captureLogger();
+    await logger.withWideEvent(async () => 'ok')(
+      { foo: 1 },
+      fakeContext({ clientContext: { Custom: { correlationId: 'corr-ctx' } } }),
+    );
+    expect(wide()[0]!.correlation_id).toBe('corr-ctx');
+  });
+
+  it('o ID do evento tem prioridade sobre o ClientContext', async () => {
+    const { logger, wide } = captureLogger();
+    await logger.withWideEvent(async () => 'ok')(
+      apiV2Event,
+      fakeContext({ clientContext: { Custom: { correlationId: 'corr-ctx' } } }),
+    );
+    expect(wide()[0]!.correlation_id).toBe('corr-1');
+  });
+});
+
+describe('timeout da Lambda', () => {
+  it('grava o wide event com outcome timeout antes de o tempo acabar', async () => {
+    const { logger, wide } = captureLogger({ timeoutMarginMs: 50 });
+    let release!: () => void;
+    const handler = logger.withWideEvent(async () => {
+      logger.getEvent().set({ etapa: 'chamando motor' });
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return 'ok';
+    });
+
+    const running = handler({}, fakeContext({ getRemainingTimeInMillis: () => 100 }));
+    await new Promise((r) => setTimeout(r, 120));
+
+    expect(wide()).toHaveLength(1);
+    expect(wide()[0]).toMatchObject({
+      level: 'error',
+      outcome: 'timeout',
+      etapa: 'chamando motor',
+      error: { type: 'LambdaTimeoutError' },
+      sampling: { reason: 'error' },
+    });
+
+    release();
+    await running;
+    expect(wide()).toHaveLength(1);
+  });
+
+  it('não grava evento de timeout quando a invocação termina a tempo', async () => {
+    const { logger, wide } = captureLogger({ timeoutMarginMs: 50 });
+    await logger.withWideEvent(async () => 'ok')({}, fakeContext({ getRemainingTimeInMillis: () => 100 }));
+    await new Promise((r) => setTimeout(r, 80));
+    expect(wide()).toHaveLength(1);
+    expect(wide()[0]!.outcome).toBe('success');
+  });
+
+  it('timeoutMarginMs 0 desliga a proteção', async () => {
+    const { logger, wide } = captureLogger({ timeoutMarginMs: 0 });
+    let release!: () => void;
+    const running = logger.withWideEvent(
+      () => new Promise<string>((resolve) => { release = () => resolve('ok'); }),
+    )({}, fakeContext({ getRemainingTimeInMillis: () => 60 }));
+    await new Promise((r) => setTimeout(r, 80));
+    expect(wide()).toHaveLength(0);
+    release();
+    await running;
+    expect(wide()[0]!.outcome).toBe('success');
+  });
+});

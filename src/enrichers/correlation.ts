@@ -1,4 +1,5 @@
 import { normalizeKey } from '../redact.js';
+import type { LambdaContext } from '../types.js';
 
 type AnyRecord = Record<string, any>;
 
@@ -50,4 +51,14 @@ export function extractCorrelationId(event: unknown, headerName: string): string
 
   // Invocação direta com o ID no payload
   return asId(findKey(ev, names));
+}
+
+/**
+ * ID de correlação enviado por outra Lambda no `ClientContext` da invocação
+ * (`Custom.correlationId`), sem alterar o payload.
+ */
+export function extractClientContextCorrelationId(context: LambdaContext | undefined, headerName: string): string | undefined {
+  const custom = context?.clientContext?.Custom;
+  if (!custom || typeof custom !== 'object') return undefined;
+  return asId(findKey(custom, [headerName, 'correlationId', 'correlation_id']));
 }

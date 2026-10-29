@@ -1,6 +1,6 @@
 import type { Logger as PinoLogger } from 'pino';
 import { getCurrentEvent, runWithEvent } from './context.js';
-import { extractCorrelationId } from './enrichers/correlation.js';
+import { extractClientContextCorrelationId, extractCorrelationId } from './enrichers/correlation.js';
 import { detectTrigger } from './enrichers/detect.js';
 import { consumeColdStart, lambdaEndFields, lambdaStartFields } from './enrichers/lambda-context.js';
 import { deriveLevel, isLevelEnabled, parseLevel } from './levels.js';
@@ -30,6 +30,22 @@ export interface Logger {
   withWideEvent<TEvent, TResult>(handler: LambdaHandler<TEvent, TResult>): LambdaHandler<TEvent, TResult>;
 }
 
+class LambdaTimeoutError extends Error {
+  constructor(remainingMs: number) {
+    super(`Invocação prestes a estourar o timeout da Lambda (${remainingMs}ms disponíveis no início)`);
+    this.name = 'LambdaTimeoutError';
+  }
+}
+
+function remainingTimeMs(context: LambdaContext | undefined): number | undefined {
+  try {
+    const value = context?.getRemainingTimeInMillis?.();
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function clampRate(value: number): number {
   if (Number.isNaN(value)) return 1;
   return Math.min(1, Math.max(0, value));
@@ -55,6 +71,7 @@ export function createLogger(options: LoggerOptions = {}): Logger {
   const includeStack = options.includeStack ?? true;
   const autoEnrich = options.autoEnrich ?? true;
   const correlationHeader = options.correlationHeader ?? 'x-correlation-id';
+  const timeoutMarginMs = options.timeoutMarginMs ?? 500;
   const pinoLogger = createPinoInstance(options.transport);
   const random = options.random ?? Math.random;
 
@@ -208,11 +225,40 @@ export function createLogger(options: LoggerOptions = {}): Logger {
       }
       try {
         event.set({
-          correlation_id: extractCorrelationId(lambdaEvent, correlationHeader) ?? context?.awsRequestId,
+          correlation_id:
+            extractCorrelationId(lambdaEvent, correlationHeader) ??
+            extractClientContextCorrelationId(context, correlationHeader) ??
+            context?.awsRequestId,
         });
         if (trigger) event.set(trigger.start(lambdaEvent));
       } catch {
         // Evento de origem inesperado: segue sem o enriquecimento automático.
+      }
+
+      let finished = false;
+      const finish = (): void => {
+        if (finished) return;
+        finished = true;
+        const durationMs = event.elapsedMs();
+        try {
+          event.set(lambdaEndFields(context));
+        } catch {
+          // ignora
+        }
+        emit(event, timestamp, durationMs);
+      };
+
+      // Quando a Lambda estoura o timeout o processo é encerrado e o `finally` não roda:
+      // grava o evento um pouco antes, com o que foi acumulado até ali.
+      let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+      const remaining = remainingTimeMs(context);
+      if (timeoutMarginMs > 0 && remaining !== undefined && remaining > timeoutMarginMs) {
+        timeoutTimer = setTimeout(() => {
+          event.set({ outcome: 'timeout' });
+          event.setError(new LambdaTimeoutError(remaining));
+          finish();
+        }, remaining - timeoutMarginMs);
+        timeoutTimer.unref?.();
       }
 
       try {
@@ -231,13 +277,8 @@ export function createLogger(options: LoggerOptions = {}): Logger {
         event.setError(err);
         throw err;
       } finally {
-        const durationMs = event.elapsedMs();
-        try {
-          event.set(lambdaEndFields(context));
-        } catch {
-          // ignora
-        }
-        emit(event, timestamp, durationMs);
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        finish();
       }
     };
   };
