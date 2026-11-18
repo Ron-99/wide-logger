@@ -49,18 +49,25 @@ Saída (uma linha por invocação):
 ### Enriquecendo de outras camadas
 
 ```ts
-import { enrich, getCurrentEvent } from '@mapfre/wide-logger';
+import { logger } from './logger';
 
 export async function buscarApolice(id: string) {
-  const end = getCurrentEvent()?.timer('dynamodb');
+  const end = logger.timer('dynamodb');
   const item = await ddb.get(...);
-  end?.();
-  enrich({ apolice: { id, produto: item.produto } });
-  getCurrentEvent()?.increment('db.queries');
+  end();
+  logger.add('apolice.id', id);
+  logger.set({ apolice: { produto: item.produto } });
 }
 ```
 
-Fora de uma invocação, `getCurrentEvent()` retorna `undefined` e `enrich()` não faz nada. `logger.getEvent()` lança erro.
+| Atalho | Descrição |
+|---|---|
+| `logger.add('a.b', valor)` | Grava um campo por caminho com pontos |
+| `logger.set(fields)` | Mescla vários campos de uma vez |
+| `logger.timer(nome)` | Retorna função que grava `timings.<nome>_ms` |
+| `logger.fail(err, extra?)` | Registra um erro tratado como o `error` do wide event |
+
+Fora de uma invocação os atalhos não fazem nada (o `timer` devolve uma função que retorna `0`). Para o resto da API, `getCurrentEvent()` retorna o `WideEvent` atual ou `undefined`, e `logger.getEvent()` lança erro fora da invocação.
 
 ### API do `WideEvent`
 
@@ -95,7 +102,32 @@ Cada chamada vira uma linha **na hora**, já ligada à invocação:
 {"level":"info","timestamp":"...","log_type":"log","service":"cotacao-auto","service.name":"cotacao-auto","request_id":"c0ffee-1","trace_id":"1-5759e988-...","correlation_id":"cotacao-7f3a","elapsed_ms":2,"message":"payload validado"}
 ```
 
-Essas mensagens **não são copiadas** para o wide event. Ele traz apenas `logs_emitted: { info: 2, warn: 1 }`, para você saber que existem linhas daquela invocação.
+A regra é a mesma para todos os níveis: as mensagens **não são copiadas** para o wide event. O que deve aparecer nele é gravado com os atalhos (`logger.add/set/timer/fail`). O wide event recebe só três sinais das linhas:
+
+- **Nível:** um `logger.warn`/`logger.error` garante que o wide event saia pelo menos com aquele nível. Um filtro por `wide_event` com `level = "error"` acha a invocação, e o `correlation_id` leva às linhas.
+- **`logs_emitted`:** contagem de linhas por nível, ex.: `{ info: 2, warn: 1 }`.
+- **Debug-on-error:** veja [Log levels](#log-levels).
+
+### Onde registrar um erro
+
+O wide event tem um único `error`: o que decidiu o resultado da invocação. As demais falhas entram como campos do domínio, fáceis de filtrar.
+
+| Situação | Usar |
+|---|---|
+| Erro que decide o resultado e é engolido | `logger.fail(err)` |
+| Erro relançado | Só o `throw`; se a mensagem mudar, passe o original como `cause` |
+| Falha secundária, que não decide o resultado | Campo de domínio (`logger.add('sns.published', false)`) e, se precisar do detalhe, `logger.error` pontual |
+
+Evite `logger.error` antes de um `throw` ou junto de um `logger.fail`: o mesmo erro sairia na linha e no wide event.
+
+```ts
+try {
+  await axios.post(url, body);
+} catch (err) {
+  throw new Error('Timeout na chamada do motor', { cause: err });
+}
+// wide event: error.message = "Timeout na chamada do motor", error.cause = { type: "AxiosError", http_status_code: 504, ... }
+```
 
 ### IDs de correlação
 
@@ -233,6 +265,43 @@ const logger = createLogger({
 ```
 
 Se a função lançar erro ou retornar `undefined`, os campos `dt.*` são omitidos. O `trace_id` do X-Ray continua sendo gravado normalmente.
+
+### Com `@opentelemetry/instrumentation-pino`
+
+A alternativa ao `traceContext` é a [`@opentelemetry/instrumentation-pino`](https://www.npmjs.com/package/@opentelemetry/instrumentation-pino), que intercepta o pino e injeta o span ativo em **todas** as linhas (imediatas e wide event). A lib traz um helper já configurado em `@mapfre/wide-logger/otel`:
+
+```bash
+npm i @opentelemetry/api @opentelemetry/instrumentation @opentelemetry/instrumentation-pino
+```
+
+```ts
+// otel.ts: carregado ANTES de qualquer import do wide-logger/pino
+import { registerInstrumentations } from '@opentelemetry/instrumentation';
+import { createPinoInstrumentation } from '@mapfre/wide-logger/otel';
+
+registerInstrumentations({ instrumentations: [createPinoInstrumentation()] });
+```
+
+Saída:
+
+```json
+{"level":"info","dt.trace_id":"0af7651916cd43dd8448eb211c80319c","dt.span_id":"b7ad6b7169203331","dt.trace_flags":"01","log_type":"log","request_id":"req-1","trace_id":"1-5759e988-...","message":"dentro"}
+```
+
+O que o helper muda em relação ao padrão da instrumentação:
+
+| Opção | Valor | Motivo |
+|---|---|---|
+| `logKeys` | `dt.trace_id`, `dt.span_id`, `dt.trace_flags` | O padrão (`trace_id`) colide com o `trace_id` do X-Ray, e no pino o campo do registro vence o do mixin: o trace do OpenTelemetry seria perdido |
+| `disableLogSending` | `true` | As linhas já chegam ao Dynatrace pelo stdout; enviar também via OTLP duplicaria os logs. Passe `false` se o envio for **só** por OTLP |
+
+Qualquer outra opção (`logHook` etc.) pode ser passada: `createPinoInstrumentation({ logHook })`.
+
+Cuidados:
+
+- **Ordem de carga:** a instrumentação só funciona se for registrada antes de o `pino` ser carregado. Em Lambda, use `NODE_OPTIONS=--require ./otel.js` (CJS) ou `--import` com o hook do `import-in-the-middle` (ESM). Se você usa a layer do OneAgent/ADOT com auto-instrumentação, a `PinoInstrumentation` pode já estar ativa: nesse caso, configure só os `logKeys`.
+- **Bundlers (esbuild/webpack/SAM/CDK `NodejsFunction`):** o `pino` precisa ficar **fora** do bundle (`external: ['pino']`), senão não há `require('pino')` para interceptar.
+- Com a instrumentação ativa, não é preciso configurar `traceContext`. Se os dois estiverem configurados, o valor do `traceContext` prevalece.
 
 ### Consultas DQL
 

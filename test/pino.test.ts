@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import pino from 'pino';
 import { resetColdStart } from '../src/enrichers/lambda-context.js';
 import { apiV2Event, captureLogger, fakeContext, sqsEvent } from './helpers.js';
 
@@ -103,5 +104,49 @@ describe('nível com pino', () => {
     expect(immediate()).toHaveLength(0);
     expect(wide()).toHaveLength(1);
     expect(wide()[0]!.level).toBe('info');
+  });
+});
+
+describe('integração com @opentelemetry/instrumentation-pino', () => {
+  // Simula o que a instrumentação faz: instala um mixin com o contexto do span ativo.
+  const otelMixin = () => ({ 'dt.trace_id': 'otel-trace', 'dt.span_id': 'otel-span', 'dt.trace_flags': '01' });
+
+  it('campos injetados pelo mixin não são apagados por chaves undefined do registro', async () => {
+    const { logger, records } = captureLogger({ traceContext: () => undefined });
+    (logger.pino as unknown as Record<symbol, unknown>)[pino.symbols.mixinSym] = otelMixin;
+
+    logger.info('fora');
+    await logger.withWideEvent(async () => {
+      logger.info('dentro');
+      return { statusCode: 200 };
+    })(apiV2Event, fakeContext());
+
+    expect(records()).toHaveLength(3);
+    for (const r of records()) {
+      expect(r).toMatchObject({ 'dt.trace_id': 'otel-trace', 'dt.span_id': 'otel-span', 'dt.trace_flags': '01' });
+    }
+  });
+
+  it('sem X-Ray, o trace_id do mixin (chave padrão da instrumentação) não é apagado', async () => {
+    const previous = process.env._X_AMZN_TRACE_ID;
+    delete process.env._X_AMZN_TRACE_ID;
+    try {
+      const { logger, records } = captureLogger();
+      (logger.pino as unknown as Record<symbol, unknown>)[pino.symbols.mixinSym] = () => ({ trace_id: 'otel-trace' });
+      await logger.withWideEvent(async () => {
+        logger.info('dentro');
+        return { statusCode: 200 };
+      })(apiV2Event, fakeContext());
+      for (const r of records()) expect(r.trace_id).toBe('otel-trace');
+    } finally {
+      if (previous !== undefined) process.env._X_AMZN_TRACE_ID = previous;
+    }
+  });
+
+  it('createPinoInstrumentation usa as chaves dt.* e desliga o envio via OTLP por padrão', async () => {
+    const { createPinoInstrumentation, DYNATRACE_LOG_KEYS } = await import('../src/otel.js');
+    const inst = createPinoInstrumentation({ enabled: false });
+    expect(inst.getConfig()).toMatchObject({ logKeys: DYNATRACE_LOG_KEYS, disableLogSending: true });
+    expect(createPinoInstrumentation({ enabled: false, disableLogSending: false }).getConfig().disableLogSending).toBe(false);
   });
 });

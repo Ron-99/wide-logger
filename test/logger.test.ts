@@ -73,6 +73,77 @@ describe('withWideEvent', () => {
     expect(records().map((r) => r.level)).toEqual(['warn', 'error']);
   });
 
+  it('logger.error gera linha mas não copia a mensagem para o wide event', async () => {
+    const { logger, records } = captureLogger();
+    const handler = logger.withWideEvent(async () => {
+      logger.error('falha ao publicar no SNS', new Error('SNS indisponível'));
+      return 'ok';
+    });
+
+    await handler({}, fakeContext());
+
+    const out = records();
+    const line = out.find((r) => r.log_type === 'log')!;
+    expect(line).toMatchObject({ level: 'error', correlation_id: 'req-123', message: 'falha ao publicar no SNS' });
+    const ev = out.find((r) => r.log_type === 'wide_event')!;
+    expect(ev).toMatchObject({ level: 'error', outcome: 'success', logs_emitted: { error: 1 } });
+    expect(ev.error).toBeUndefined();
+    expect(JSON.stringify(ev)).not.toContain('falha ao publicar no SNS');
+  });
+
+  it('atalhos add/set/timer/fail gravam no wide event', async () => {
+    const { logger, records } = captureLogger();
+    const handler = logger.withWideEvent(async () => {
+      logger.add('bureau.status', 'ok');
+      logger.set({ bureau: { from_cache: true } });
+      const end = logger.timer('motor');
+      end();
+      logger.fail(new Error('SNS indisponível'), { retriable: true });
+      return 'ok';
+    });
+
+    await handler({}, fakeContext());
+
+    const ev = records().find((r) => r.log_type === 'wide_event')!;
+    expect(ev).toMatchObject({
+      level: 'error',
+      outcome: 'success',
+      bureau: { status: 'ok', from_cache: true },
+      error: { type: 'Error', message: 'SNS indisponível', retriable: true },
+    });
+    expect(typeof ev.timings.motor_ms).toBe('number');
+  });
+
+  it('atalhos fora de withWideEvent não lançam erro', () => {
+    const { logger, records } = captureLogger();
+    expect(() => {
+      logger.add('a.b', 1);
+      logger.set({ a: 1 });
+      logger.fail(new Error('x'));
+    }).not.toThrow();
+    expect(logger.timer('t')()).toBe(0);
+    expect(records()).toHaveLength(0);
+  });
+
+  it('erro relançado com cause mantém a origem em error.cause', async () => {
+    const { logger, records } = captureLogger();
+    const handler = logger.withWideEvent(async () => {
+      try {
+        throw Object.assign(new Error('Request failed with status code 504'), { code: 'ECONNABORTED' });
+      } catch (err) {
+        throw new Error('Timeout na chamada do motor', { cause: err });
+      }
+    });
+
+    await expect(handler({}, fakeContext())).rejects.toThrow('Timeout na chamada do motor');
+
+    const ev = records().find((r) => r.log_type === 'wide_event')!;
+    expect(ev.error).toMatchObject({
+      message: 'Timeout na chamada do motor',
+      cause: { message: 'Request failed with status code 504', code: 'ECONNABORTED' },
+    });
+  });
+
   it('logger.warn dentro da invocação escala o wide event para warn', async () => {
     const { logger, wide } = captureLogger();
     await logger.withWideEvent(async () => {

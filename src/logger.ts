@@ -24,6 +24,19 @@ export interface Logger {
   info(message: string, data?: unknown): void;
   warn(message: string, data?: unknown): void;
   error(message: string, data?: unknown): void;
+  /**
+   * Atalhos para o wide event da invocação atual. Fora de `withWideEvent` não fazem nada.
+   * As linhas de `debug/info/warn/error` não entram no wide event; o que deve aparecer nele
+   * é gravado por aqui.
+   */
+  /** Define um campo por caminho com pontos: `logger.add('bureau.status', 'ok')`. */
+  add(path: string, value: unknown): void;
+  /** Mescla vários campos de uma vez. */
+  set(fields: Record<string, unknown>): void;
+  /** Inicia um cronômetro; ao chamar a função retornada, grava `timings.<name>_ms`. */
+  timer(name: string): () => number;
+  /** Registra um erro tratado como o `error` do wide event (nível final `error`). */
+  fail(err: unknown, extra?: Record<string, unknown>): void;
   /** Wide event da invocação atual. Lança erro se chamado fora de `withWideEvent`. */
   getEvent(): WideEvent;
   /** Envolve um handler: cria, enriquece e emite um único wide event por invocação. */
@@ -290,6 +303,16 @@ export function createLogger(options: LoggerOptions = {}): Logger {
     info: (message, data) => log('info', message, data),
     warn: (message, data) => log('warn', message, data),
     error: (message, data) => log('error', message, data),
+    add: (path, value) => {
+      getCurrentEvent()?.add(path, value);
+    },
+    set: (fields) => {
+      getCurrentEvent()?.set(fields);
+    },
+    timer: (name) => getCurrentEvent()?.timer(name) ?? (() => 0),
+    fail: (err, extra) => {
+      getCurrentEvent()?.setError(err, extra);
+    },
     getEvent: () => {
       const current = getCurrentEvent();
       if (!current) {
